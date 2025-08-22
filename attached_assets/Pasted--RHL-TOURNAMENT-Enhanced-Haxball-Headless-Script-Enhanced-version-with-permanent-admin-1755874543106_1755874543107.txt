@@ -1,0 +1,1042 @@
+// 🎮 RHL TOURNAMENT 🎮 - Enhanced Haxball Headless Script
+// Enhanced version with permanent admin saving and auto-join prevention
+// Players wait in spectators until admin moves them - they don't auto-return to spectators
+// Copy the entire script and paste it on haxball.com to create the tournament room
+
+// ==================== IMPORTANT SETTINGS - Change before use ====================
+const ROOM_CONFIG = {
+    roomName: "🎮 RHL TOURNAMENT 🎮",
+    playerName: "[HOST]",
+    maxPlayers: 16,
+    public: true,
+    geo: { code: "eg", lat: 30.0444, lon: 31.2357 }, // Egypt - for best ping to Egyptian players
+    token: "thr1.AAAAAGiiB9wGRHVJ7oMR6g.RThbhoe2xHc", // Change this!
+    // Optional: You can also try these locations for better Middle East connectivity:
+    // geo: { code: "ae", lat: 25.2048, lon: 55.2708 }, // UAE - Dubai
+    // geo: { code: "sa", lat: 24.7136, lon: 46.6753 }, // Saudi Arabia - Riyadh  
+    // geo: { code: "tr", lat: 41.0082, lon: 28.9784 }, // Turkey - Istanbul (EU servers)
+};
+
+const DISCORD_CONFIG = {
+    webhook: "https://canary.discord.com/api/webhooks/1406959936851939379/Bla-hWfT8-lC5U9gXxouT9GA2W0Txltpnv4CrgzYvArO2mqMr_WaUkBA-TsYs3GrTXDT", // Change this!
+    channelId: "1406959666717790228",
+    reportRoleId: "1406593382632915014",
+    serverInvite: "https://discord.gg/R3Rtwqqhwm", // Change this!
+};
+
+const OWNER_PASSWORD = "opopop"; // Change the password!
+
+// ==================== System Variables ====================
+let room;
+let gameState = {
+    owner: null,
+    admins: new Set(),
+    savedAdmins: new Map(), // Save admin info permanently: name -> connection
+    savedOwner: null, // Save owner connection permanently
+    ownerName: null, // Save owner name permanently
+    clubs: new Map(),
+    clubCaptains: new Map(),
+    playerStats: new Map(),
+    currentMatch: null,
+    lastDiscordReminder: 0,
+    matchStats: {
+        redGoals: 0,
+        blueGoals: 0,
+        goalScorers: [],
+        assists: [],
+        mvp: null
+    },
+    ballTracker: {
+        lastTouchPlayer: null,
+        lastTouchTime: 0,
+        lastTouchTeam: 0,
+        ballHistory: []
+    }
+};
+
+// ==================== Room Initialization ====================
+try {
+    room = HBInit(ROOM_CONFIG);
+    console.log("✅ Room initialized successfully");
+    
+    // Send initial Discord notification
+    sendDiscordWebhook({
+        title: "🎮 RHL TOURNAMENT Room Started",
+        description: "Tournament room is now online and ready for players!",
+        color: 0x00ff00,
+        timestamp: new Date().toISOString(),
+        fields: [
+            { name: "Room Name", value: ROOM_CONFIG.roomName, inline: true },
+            { name: "Max Players", value: ROOM_CONFIG.maxPlayers.toString(), inline: true },
+            { name: "Location", value: "Egypt 🇪🇬", inline: true }
+        ]
+    });
+} catch (error) {
+    console.error("❌ Failed to initialize room:", error);
+    throw error;
+}
+
+// ==================== Helper Functions ====================
+function sendDiscordWebhook(embed) {
+    try {
+        fetch(DISCORD_CONFIG.webhook, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                embeds: [embed],
+            }),
+        }).catch(err => console.log("Discord webhook error:", err));
+    } catch (error) {
+        console.log("Discord webhook error:", error);
+    }
+}
+
+function getPlayerRole(player) {
+    // Check club captain first (has priority)
+    for (let [clubName, captain] of gameState.clubCaptains) {
+        if (captain === player.name) {
+            if (gameState.owner && player.id === gameState.owner.id) {
+                return `👑 OWNER [${clubName}]`;
+            }
+            if (gameState.admins.has(player.id)) {
+                return `🛡️ ADMIN [${clubName}]`;
+            }
+            return `👨‍✈️ CAPTAIN [${clubName}]`;
+        }
+    }
+
+    // Check other roles
+    if (gameState.owner && player.id === gameState.owner.id) return "👑 OWNER";
+    if (gameState.admins.has(player.id)) return "🛡️ ADMIN";
+
+    // Check club membership
+    for (let [clubName, members] of gameState.clubs) {
+        if (members.includes(player.name)) {
+            return `⚽ [${clubName}]`;
+        }
+    }
+    return "👤 PLAYER";
+}
+
+function formatPlayerName(player) {
+    const role = getPlayerRole(player);
+    return `${role} ${player.name}`;
+}
+
+function isOwner(player) {
+    return gameState.owner && player.id === gameState.owner.id;
+}
+
+function isAdmin(player) {
+    return isOwner(player) || gameState.admins.has(player.id);
+}
+
+function isSavedOwner(player) {
+    return (
+        (gameState.savedOwner && player.conn === gameState.savedOwner) ||
+        (gameState.ownerName && player.name === gameState.ownerName)
+    );
+}
+
+function isSavedAdmin(player) {
+    return (
+        gameState.savedAdmins.has(player.name) &&
+        (player.conn === gameState.savedAdmins.get(player.name) ||
+            gameState.savedAdmins.get(player.name) === null)
+    );
+}
+
+function autoRestoreRanks(player) {
+    // Restore owner automatically
+    if (isSavedOwner(player)) {
+        gameState.owner = player;
+        room.setPlayerAdmin(player.id, true);
+        room.sendAnnouncement(
+            `👑 Welcome back, Owner ${player.name}!`,
+            null,
+            0xffd700,
+            "bold",
+        );
+
+        gameState.savedOwner = player.conn;
+        gameState.ownerName = player.name;
+
+        sendDiscordWebhook({
+            title: "👑 Owner Auto-Login",
+            description: `**${player.name}** automatically restored as owner`,
+            color: 0xffd700,
+            timestamp: new Date().toISOString(),
+        });
+        return true;
+    }
+
+    // Restore admin automatically
+    if (isSavedAdmin(player)) {
+        gameState.admins.add(player.id);
+        room.setPlayerAdmin(player.id, true);
+        room.sendAnnouncement(
+            `🛡️ Welcome back, Admin ${player.name}!`,
+            null,
+            0x00ff00,
+            "bold",
+        );
+
+        gameState.savedAdmins.set(player.name, player.conn);
+
+        sendDiscordWebhook({
+            title: "🛡️ Admin Auto-Login",
+            description: `**${player.name}** automatically restored as admin`,
+            color: 0x00ff00,
+            timestamp: new Date().toISOString(),
+        });
+        return true;
+    }
+
+    return false;
+}
+
+function getPlayerStats(playerName) {
+    if (!gameState.playerStats.has(playerName)) {
+        gameState.playerStats.set(playerName, {
+            goals: 0,
+            assists: 0,
+            ownGoals: 0,
+            wins: 0,
+            losses: 0,
+            mvps: 0,
+            gamesPlayed: 0,
+        });
+    }
+    return gameState.playerStats.get(playerName);
+}
+
+function createGoalEffect(player) {
+    room.sendAnnouncement(
+        `🎯⚡ GOAL! Amazing shot by ${player.name}! ⚡🎯`,
+        null,
+        0x00ff00,
+        "bold",
+        2,
+    );
+
+    setTimeout(() => {
+        room.sendAnnouncement(
+            `🔥 ${player.name} is on fire! 🔥`,
+            null,
+            0xff6600,
+            "bold",
+            1,
+        );
+    }, 1000);
+}
+
+function createAssistEffect(player) {
+    room.sendAnnouncement(
+        `👊 Perfect pass by ${player.name}! 👊`,
+        null,
+        0x0066ff,
+        "bold",
+        1,
+    );
+}
+
+function createOwnGoalEffect(player) {
+    room.sendAnnouncement(
+        `😂 Oops! Own goal by ${player.name}! 😂`,
+        null,
+        0xff0000,
+        "bold",
+        1,
+    );
+}
+
+// ==================== Player Movement Control ====================
+// Track manually moved players
+let manuallyMovedPlayers = new Set();
+
+// This function prevents NEW players from automatically joining teams
+function preventAutoJoinForNewPlayers() {
+    const players = room.getPlayerList();
+    players.forEach(player => {
+        // Only prevent auto-join for players who haven't been manually moved by admin
+        if (player.team !== 0 && !isAdmin(player) && !manuallyMovedPlayers.has(player.id)) {
+            // Move to spectators only if they auto-joined
+            room.setPlayerTeam(player.id, 0);
+            room.sendAnnouncement(
+                `⚠️ ${player.name} moved to spectators. Wait for admin to assign you to a team.`,
+                player.id,
+                0xff6600,
+                "normal"
+            );
+        }
+    });
+}
+
+// Mark players as manually moved when admin moves them
+function markAsManuallyMoved(playerId) {
+    manuallyMovedPlayers.add(playerId);
+    console.log(`Player ${playerId} marked as manually moved`);
+}
+
+// Remove player from tracking when they leave
+function removePlayerTracking(playerId) {
+    manuallyMovedPlayers.delete(playerId);
+}
+
+// Run auto-join prevention check every 1 second for new players only
+setInterval(preventAutoJoinForNewPlayers, 1000);
+
+// ==================== Discord Reminder System ====================
+function sendDiscordReminder() {
+    const now = Date.now();
+    if (now - gameState.lastDiscordReminder >= 180000) { // 3 minutes
+        room.sendAnnouncement(
+            `📢 Join our Discord server: ${DISCORD_CONFIG.serverInvite}`,
+            null,
+            0x7289da,
+            "bold",
+        );
+        gameState.lastDiscordReminder = now;
+    }
+}
+
+setInterval(sendDiscordReminder, 180000); // Every 3 minutes
+
+// ==================== Commands System ====================
+const commands = {
+    // Owner authentication
+    owner: (player, args) => {
+        if (args[0] === OWNER_PASSWORD) {
+            gameState.owner = player;
+            gameState.savedOwner = player.conn;
+            gameState.ownerName = player.name;
+            room.setPlayerAdmin(player.id, true);
+
+            room.sendAnnouncement(
+                `👑 ${player.name} is now the Owner! (Permanently saved)`,
+                null,
+                0xffd700,
+                "bold",
+            );
+
+            sendDiscordWebhook({
+                title: "👑 Owner Login",
+                description: `**${player.name}** authenticated as room owner`,
+                color: 0xffd700,
+                timestamp: new Date().toISOString(),
+            });
+        } else {
+            room.sendAnnouncement(
+                "❌ Wrong owner password!",
+                player.id,
+                0xff0000,
+            );
+        }
+    },
+
+    // Admin management
+    admin: (player, args) => {
+        if (!isOwner(player)) {
+            room.sendAnnouncement(
+                "❌ Only the owner can give admin privileges!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        gameState.admins.add(targetPlayer.id);
+        gameState.savedAdmins.set(targetPlayer.name, targetPlayer.conn);
+        room.setPlayerAdmin(targetPlayer.id, true);
+
+        room.sendAnnouncement(
+            `🛡️ ${targetPlayer.name} is now an admin! (Permanently saved)`,
+            null,
+            0x00ff00,
+            "bold",
+        );
+
+        sendDiscordWebhook({
+            title: "🛡️ New Admin",
+            description: `**${targetPlayer.name}** promoted to admin by **${player.name}**`,
+            color: 0x00ff00,
+            timestamp: new Date().toISOString(),
+        });
+    },
+
+    // Remove admin
+    unadmin: (player, args) => {
+        if (!isOwner(player)) {
+            room.sendAnnouncement(
+                "❌ Only the owner can remove admin privileges!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        gameState.admins.delete(targetPlayer.id);
+        gameState.savedAdmins.delete(targetPlayer.name);
+        room.setPlayerAdmin(targetPlayer.id, false);
+
+        room.sendAnnouncement(
+            `❌ ${targetPlayer.name} is no longer an admin!`,
+            null,
+            0xff6600,
+            "bold",
+        );
+    },
+
+    // Create club with captain
+    newclub: (player, args) => {
+        if (!isOwner(player)) {
+            room.sendAnnouncement(
+                "❌ Only the owner can create clubs!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        if (args.length < 2) {
+            room.sendAnnouncement(
+                "❌ Usage: !newclub <club_name> <captain_name>",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const clubName = args[0];
+        const captainName = args.slice(1).join(" ");
+
+        if (gameState.clubs.has(clubName)) {
+            room.sendAnnouncement(
+                "❌ Club already exists!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        gameState.clubs.set(clubName, []);
+        gameState.clubCaptains.set(clubName, captainName);
+        gameState.clubs.get(clubName).push(captainName);
+
+        room.sendAnnouncement(
+            `⚽ Club "${clubName}" created with ${captainName} as captain!`,
+            null,
+            0x00ff00,
+            "bold",
+        );
+
+        sendDiscordWebhook({
+            title: "⚽ New Club Created",
+            description: `**${clubName}** created with **${captainName}** as captain`,
+            color: 0x00ff00,
+            timestamp: new Date().toISOString(),
+        });
+    },
+
+    // Add player to club
+    addplayer: (player, args) => {
+        if (!isOwner(player)) {
+            room.sendAnnouncement(
+                "❌ Only the owner can add players to clubs!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        if (args.length < 2) {
+            room.sendAnnouncement(
+                "❌ Usage: !addplayer <club_name> <player_name>",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const clubName = args[0];
+        const playerName = args.slice(1).join(" ");
+
+        if (!gameState.clubs.has(clubName)) {
+            room.sendAnnouncement(
+                "❌ Club doesn't exist!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const clubMembers = gameState.clubs.get(clubName);
+        if (clubMembers.includes(playerName)) {
+            room.sendAnnouncement(
+                "❌ Player already in this club!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        clubMembers.push(playerName);
+        room.sendAnnouncement(
+            `⚽ ${playerName} added to club "${clubName}"!`,
+            null,
+            0x00ff00,
+            "bold",
+        );
+    },
+
+    // List clubs
+    clubs: (player, args) => {
+        if (gameState.clubs.size === 0) {
+            room.sendAnnouncement(
+                "📋 No clubs created yet!",
+                player.id,
+                0xffffff,
+            );
+            return;
+        }
+
+        let clubList = "📋 Club List:\n";
+        for (let [clubName, members] of gameState.clubs) {
+            const captain = gameState.clubCaptains.get(clubName);
+            clubList += `⚽ ${clubName} (Captain: ${captain}) - ${members.length} members\n`;
+        }
+        room.sendAnnouncement(clubList, player.id, 0x00ff00);
+    },
+
+    // Player stats
+    stats: (player, args) => {
+        const targetName = args.length > 0 ? args.join(" ") : player.name;
+        const stats = getPlayerStats(targetName);
+        const winRate =
+            stats.gamesPlayed > 0
+                ? ((stats.wins / stats.gamesPlayed) * 100).toFixed(1)
+                : "0";
+
+        room.sendAnnouncement(
+            `📊 Stats for ${targetName}:\n` +
+            `⚽ Goals: ${stats.goals}\n` +
+            `👥 Assists: ${stats.assists}\n` +
+            `🥅 Own Goals: ${stats.ownGoals}\n` +
+            `🏆 Wins: ${stats.wins}\n` +
+            `😔 Losses: ${stats.losses}\n` +
+            `⭐ MVPs: ${stats.mvps}\n` +
+            `🎮 Games Played: ${stats.gamesPlayed}\n` +
+            `📈 Win Rate: ${winRate}%`,
+            player.id,
+            0x00ff00,
+        );
+    },
+
+    // Kick player
+    kick: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can kick players!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        if (isOwner(targetPlayer)) {
+            room.sendAnnouncement(
+                "❌ Cannot kick the owner!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        room.kickPlayer(targetPlayer.id, "Kicked by admin", false);
+        room.sendAnnouncement(
+            `👢 ${targetPlayer.name} was kicked by ${player.name}`,
+            null,
+            0xff6600,
+            "bold",
+        );
+    },
+
+    // Ban player
+    ban: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can ban players!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        if (isOwner(targetPlayer)) {
+            room.sendAnnouncement(
+                "❌ Cannot ban the owner!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        room.kickPlayer(targetPlayer.id, "Banned by admin", true);
+        room.sendAnnouncement(
+            `🚫 ${targetPlayer.name} was banned by ${player.name}`,
+            null,
+            0xff0000,
+            "bold",
+        );
+    },
+
+    // Move player to red team
+    red: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can move players!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        markAsManuallyMoved(targetPlayer.id); // Mark BEFORE moving
+        room.setPlayerTeam(targetPlayer.id, 1);
+        room.sendAnnouncement(
+            `🔴 ${formatPlayerName(targetPlayer)} moved to Red Team by ${player.name}`,
+            null,
+            0xff0000,
+        );
+    },
+
+    // Move player to blue team
+    blue: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can move players!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        markAsManuallyMoved(targetPlayer.id); // Mark BEFORE moving
+        room.setPlayerTeam(targetPlayer.id, 2);
+        room.sendAnnouncement(
+            `🔵 ${formatPlayerName(targetPlayer)} moved to Blue Team by ${player.name}`,
+            null,
+            0x0000ff,
+        );
+    },
+
+    // Move player to spectators
+    spec: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can move players!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        const targetName = args.join(" ");
+        const targetPlayer = room.getPlayerList().find((p) => p.name === targetName);
+
+        if (!targetPlayer) {
+            room.sendAnnouncement("❌ Player not found!", player.id, 0xff0000);
+            return;
+        }
+
+        markAsManuallyMoved(targetPlayer.id); // Mark BEFORE moving
+        room.setPlayerTeam(targetPlayer.id, 0);
+        room.sendAnnouncement(
+            `👁️ ${formatPlayerName(targetPlayer)} moved to Spectators by ${player.name}`,
+            null,
+            0x00ffff,
+        );
+    },
+
+    // Clear chat
+    clear: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can clear chat!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        for (let i = 0; i < 100; i++) {
+            room.sendAnnouncement(" ", null, 0x000000, "normal");
+        }
+        room.sendAnnouncement(
+            "🧹 Chat cleared by " + player.name,
+            null,
+            0x00ff00,
+            "bold",
+        );
+    },
+
+    // Pause game
+    pause: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can pause the game!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        room.pauseGame(true);
+        room.sendAnnouncement(
+            "⏸️ Game paused by " + player.name,
+            null,
+            0xff6600,
+            "bold",
+        );
+    },
+
+    // Unpause game
+    unpause: (player, args) => {
+        if (!isAdmin(player)) {
+            room.sendAnnouncement(
+                "❌ Only admins can unpause the game!",
+                player.id,
+                0xff0000,
+            );
+            return;
+        }
+
+        room.pauseGame(false);
+        room.sendAnnouncement(
+            "▶️ Game unpaused by " + player.name,
+            null,
+            0x00ff00,
+            "bold",
+        );
+    },
+
+    // Help command
+    help: (player, args) => {
+        let helpText = "📋 Available Commands:\n\n";
+        
+        if (isOwner(player)) {
+            helpText += "👑 Owner Commands:\n";
+            helpText += "!admin <player_name> - Give admin privileges\n";
+            helpText += "!unadmin <player_name> - Remove admin privileges\n";
+            helpText += "!newclub <club_name> <captain_name> - Create a club\n";
+            helpText += "!addplayer <club_name> <player_name> - Add player to club\n\n";
+        }
+        
+        if (isAdmin(player)) {
+            helpText += "🛡️ Admin Commands:\n";
+            helpText += "!kick <player_name> - Kick a player\n";
+            helpText += "!ban <player_name> - Ban a player\n";
+            helpText += "!red <player_name> - Move to Red Team\n";
+            helpText += "!blue <player_name> - Move to Blue Team\n";
+            helpText += "!spec <player_name> - Move to Spectators\n";
+            helpText += "!clear - Clear chat\n";
+            helpText += "!pause - Pause game\n";
+            helpText += "!unpause - Unpause game\n\n";
+        }
+        
+        helpText += "👤 General Commands:\n";
+        helpText += "!stats [player_name] - Show player stats\n";
+        helpText += "!clubs - Show club list\n";
+        helpText += "!help - Show this command list\n";
+        
+        room.sendAnnouncement(helpText, player.id, 0x00ff00);
+    }
+};
+
+// ==================== Room Events ====================
+room.onPlayerJoin = function(player) {
+    // Auto-restore ranks
+    const restored = autoRestoreRanks(player);
+    
+    if (!restored) {
+        room.sendAnnouncement(
+            `🎮 Welcome ${player.name}! Type !help for commands`,
+            null,
+            0x00ff00,
+            "bold",
+            2,
+        );
+        
+        room.sendAnnouncement(
+            `📢 Join our Discord server: ${DISCORD_CONFIG.serverInvite}`,
+            player.id,
+            0x7289da,
+            "normal",
+        );
+    }
+
+    sendDiscordWebhook({
+        title: "👋 Player Joined",
+        description: `**${player.name}** joined the room`,
+        color: 0x00ff00,
+        timestamp: new Date().toISOString(),
+        fields: [
+            { name: "Player Name", value: player.name, inline: true },
+            { name: "ID", value: player.id.toString(), inline: true },
+        ]
+    });
+};
+
+room.onPlayerLeave = function(player) {
+    // Remove from active admins (but save remains)
+    if (gameState.admins.has(player.id)) {
+        gameState.admins.delete(player.id);
+    }
+    
+    // Remove active owner (but save remains)
+    if (gameState.owner && player.id === gameState.owner.id) {
+        gameState.owner = null;
+    }
+
+    // Remove from manually moved tracking
+    removePlayerTracking(player.id);
+
+    room.sendAnnouncement(
+        `👋 ${formatPlayerName(player)} left the room`,
+        null,
+        0xff6600,
+        "normal",
+    );
+
+    sendDiscordWebhook({
+        title: "👋 Player Left",
+        description: `**${player.name}** left the room`,
+        color: 0xff6600,
+        timestamp: new Date().toISOString(),
+    });
+};
+
+room.onPlayerChat = function(player, message) {
+    // Handle commands
+    if (message.startsWith("!")) {
+        const args = message.slice(1).split(" ");
+        const command = args.shift().toLowerCase();
+
+        if (commands[command]) {
+            commands[command](player, args);
+            return false; // Prevent showing message in chat
+        }
+    }
+
+    // Show message with role
+    const formattedMessage = `${formatPlayerName(player)}: ${message}`;
+    room.sendAnnouncement(formattedMessage, null, 0xffffff, "normal");
+    
+    return false; // Prevent showing original message
+};
+
+room.onPlayerTeamChange = function(changedPlayer, byPlayer) {
+    const teamNames = ["👁️ Spectators", "🔴 Red Team", "🔵 Blue Team"];
+    const newTeam = teamNames[changedPlayer.team];
+    
+    // If player tries to change their own team (not by admin)
+    if (byPlayer && byPlayer.id === changedPlayer.id && !isAdmin(byPlayer)) {
+        // Only prevent if they weren't manually moved before
+        if (!manuallyMovedPlayers.has(changedPlayer.id)) {
+            room.setPlayerTeam(changedPlayer.id, 0); // Return to spectators
+            room.sendAnnouncement(
+                `⚠️ ${changedPlayer.name} you cannot change your own team. Ask an admin.`,
+                changedPlayer.id,
+                0xff6600,
+                "normal"
+            );
+            return;
+        }
+        // If they were manually moved before, allow them to change teams
+        room.sendAnnouncement(
+            `↔️ ${formatPlayerName(changedPlayer)} moved to ${newTeam}`,
+            null,
+            0x00ffff,
+            "normal",
+        );
+    }
+    
+    // If admin moved the player
+    if (byPlayer && byPlayer.id !== changedPlayer.id && isAdmin(byPlayer)) {
+        markAsManuallyMoved(changedPlayer.id); // Mark as manually moved by admin
+        room.sendAnnouncement(
+            `↔️ ${formatPlayerName(changedPlayer)} moved to ${newTeam} by ${formatPlayerName(byPlayer)}`,
+            null,
+            0x00ffff,
+            "normal",
+        );
+    }
+};
+
+room.onGameStart = function(byPlayer) {
+    if (byPlayer) {
+        room.sendAnnouncement(
+            `🚀 Game started by ${formatPlayerName(byPlayer)}`,
+            null,
+            0x00ff00,
+            "bold",
+            2,
+        );
+        
+        // Create new match stats
+        gameState.matchStats = {
+            redGoals: 0,
+            blueGoals: 0,
+            goalScorers: [],
+            assists: [],
+            mvp: null
+        };
+
+        sendDiscordWebhook({
+            title: "🚀 Game Started",
+            description: `Game started by **${byPlayer.name}**`,
+            color: 0x00ff00,
+            timestamp: new Date().toISOString(),
+        });
+    }
+};
+
+room.onGameStop = function(byPlayer) {
+    if (byPlayer) {
+        room.sendAnnouncement(
+            `⏹️ Game stopped by ${formatPlayerName(byPlayer)}`,
+            null,
+            0xff6600,
+            "bold",
+        );
+
+        sendDiscordWebhook({
+            title: "⏹️ Game Stopped",
+            description: `Game stopped by **${byPlayer.name}**`,
+            color: 0xff6600,
+            timestamp: new Date().toISOString(),
+        });
+    }
+};
+
+room.onTeamGoal = function(team) {
+    const scores = room.getScores();
+    gameState.matchStats.redGoals = scores.red;
+    gameState.matchStats.blueGoals = scores.blue;
+    
+    const teamName = team === 1 ? "🔴 Red Team" : "🔵 Blue Team";
+    const score = `${scores.red} - ${scores.blue}`;
+    
+    room.sendAnnouncement(
+        `⚽ GOAL! ${teamName}`,
+        null,
+        team === 1 ? 0xff0000 : 0x0000ff,
+        "bold",
+        2,
+    );
+    
+    setTimeout(() => {
+        room.sendAnnouncement(
+            `📊 Score: ${score}`,
+            null,
+            0x00ff00,
+            "bold",
+            1,
+        );
+    }, 1000);
+
+    sendDiscordWebhook({
+        title: "⚽ GOAL!",
+        description: `Goal for ${teamName}!\nScore: **${score}**`,
+        color: team === 1 ? 0xff0000 : 0x0000ff,
+        timestamp: new Date().toISOString(),
+    });
+};
+
+room.onGamePause = function(byPlayer) {
+    if (byPlayer) {
+        room.sendAnnouncement(
+            `⏸️ Game paused by ${formatPlayerName(byPlayer)}`,
+            null,
+            0xff6600,
+            "bold",
+        );
+    }
+};
+
+room.onGameUnpause = function(byPlayer) {
+    if (byPlayer) {
+        room.sendAnnouncement(
+            `▶️ Game unpaused by ${formatPlayerName(byPlayer)}`,
+            null,
+            0x00ff00,
+            "bold",
+        );
+    }
+};
+
+// ==================== Welcome Message ====================
+room.sendAnnouncement(
+    "🎮 Welcome to RHL TOURNAMENT 🎮\n" +
+    "📋 Type !help to see available commands\n" +
+    "📢 Join our Discord server: " + DISCORD_CONFIG.serverInvite + "\n" +
+    "⚠️ Note: New players start in spectators. Once admin moves you to a team, you can freely switch teams!",
+    null,
+    0x00ff00,
+    "bold",
+    2
+);
+
+console.log("🎮 RHL TOURNAMENT Script Loaded Successfully!");
+console.log("⚠️ New player system activated:");
+console.log("  - New players auto-moved to spectators"); 
+console.log("  - Once admin moves them to teams, they can freely switch");
+console.log("  - Only prevents initial auto-join, not subsequent movements");
