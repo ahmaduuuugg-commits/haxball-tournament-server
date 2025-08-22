@@ -125,15 +125,55 @@ async function createHaxballRoom() {
         await new Promise(resolve => setTimeout(resolve, 3000));
 
         // Load tournament script
-        const tournamentScript = fs.readFileSync(path.join(__dirname, 'scripts/haxball-tournament.js'), 'utf8');
+        let tournamentScript = fs.readFileSync(path.join(__dirname, 'scripts/haxball-tournament.js'), 'utf8');
         
-        // Replace config values with environment variables
-        const configuredScript = tournamentScript
-            .replace('thr1.AAAAAGiiB9wGRHVJ7oMR6g.RThbhoe2xHc', config.HAXBALL_TOKEN)
-            .replace('https://canary.discord.com/api/webhooks/1406959936851939379/Bla-hWfT8-lC5U9gXxouT9GA2W0Txltpnv4CrgzYvArO2mqMr_WaUkBA-TsYs3GrTXDT', config.DISCORD_WEBHOOK)
-            .replace('https://discord.gg/R3Rtwqqhwm', config.DISCORD_INVITE)
-            .replace('opopop', config.OWNER_PASSWORD)
-            .replace('🎮 RHL TOURNAMENT 🎮', config.ROOM_NAME);
+        // Create environment configuration object for browser
+        const envConfig = {
+            HAXBALL_TOKEN: config.HAXBALL_TOKEN,
+            DISCORD_WEBHOOK: config.DISCORD_WEBHOOK,
+            DISCORD_CHANNEL_ID: config.DISCORD_CHANNEL_ID,
+            DISCORD_REPORT_ROLE_ID: config.DISCORD_REPORT_ROLE_ID,
+            DISCORD_INVITE: config.DISCORD_INVITE,
+            OWNER_PASSWORD: config.OWNER_PASSWORD,
+            ROOM_NAME: config.ROOM_NAME,
+            MAX_PLAYERS: config.MAX_PLAYERS,
+            GEO_CODE: config.GEO_CODE,
+            GEO_LAT: config.GEO_LAT,
+            GEO_LON: config.GEO_LON
+        };
+
+        // Replace all process.env references with actual values
+        let configuredScript = tournamentScript;
+        
+        // Replace process.env.VARIABLE || "default" patterns
+        configuredScript = configuredScript.replace(/process\.env\.(\w+)\s*\|\|\s*"([^"]*)"/g, (match, envVar, defaultVal) => {
+            const value = envConfig[envVar] || defaultVal;
+            return `"${value}"`;
+        });
+        
+        // Replace process.env.VARIABLE || 'default' patterns
+        configuredScript = configuredScript.replace(/process\.env\.(\w+)\s*\|\|\s*'([^']*)'/g, (match, envVar, defaultVal) => {
+            const value = envConfig[envVar] || defaultVal;
+            return `"${value}"`;
+        });
+        
+        // Replace parseInt(process.env.VARIABLE) || number patterns
+        configuredScript = configuredScript.replace(/parseInt\(process\.env\.(\w+)\)\s*\|\|\s*(\d+)/g, (match, envVar, defaultVal) => {
+            const value = envConfig[envVar] || defaultVal;
+            return value;
+        });
+        
+        // Replace parseFloat(process.env.VARIABLE) || number patterns
+        configuredScript = configuredScript.replace(/parseFloat\(process\.env\.(\w+)\)\s*\|\|\s*([\d.]+)/g, (match, envVar, defaultVal) => {
+            const value = envConfig[envVar] || defaultVal;
+            return value;
+        });
+        
+        // Replace any remaining process.env.VARIABLE
+        configuredScript = configuredScript.replace(/process\.env\.(\w+)/g, (match, envVar) => {
+            const value = envConfig[envVar];
+            return value ? `"${value}"` : 'undefined';
+        });
 
         // Inject tournament script
         await page.evaluate(configuredScript);
